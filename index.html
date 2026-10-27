@@ -1,0 +1,258 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Don't Let Them In</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;min-height:100vh;display:grid;place-items:center;
+  background:radial-gradient(ellipse,#301313,#090909 70%);
+  color:#f5eeee;font-family:Arial,sans-serif;text-align:center;padding:20px
+}
+main{
+  width:min(440px,100%);padding:30px 24px;background:#151111;
+  border:1px solid #633030;border-radius:12px;box-shadow:0 0 45px #000
+}
+h1{color:#ef5555;font-size:2rem}
+p{color:#c5baba;line-height:1.5}
+input,button{
+  width:100%;padding:14px;margin-top:12px;border-radius:7px;font-size:1rem
+}
+input{background:#090909;color:white;border:1px solid #604444;text-align:center;text-transform:uppercase}
+button{background:#a52a2a;color:white;border:0;cursor:pointer;font-weight:bold}
+button:hover{background:#c43b3b}
+button:disabled{opacity:.5;cursor:not-allowed}
+#room{display:none;border-top:1px solid #633030;margin-top:20px;padding-top:12px}
+#roomCode{font-size:2rem;letter-spacing:.2em;color:#ef5555}
+#players{padding:0;list-style:none}
+#players li{padding:8px;background:#241818;margin:6px 0;border-radius:6px}
+#status{min-height:24px;overflow-wrap:anywhere}
+.note{font-size:.8rem;color:#9c8d8d}
+</style>
+</head>
+<body>
+<main>
+  <h1>DON'T LET THEM IN</h1>
+  <p>Trust no one. Check the doors. Survive together.</p>
+
+  <button id="create">CREATE PRIVATE ROOM</button>
+  <p>— OR JOIN YOUR FRIENDS —</p>
+  <input id="code" maxlength="6" placeholder="ENTER ROOM CODE" autocomplete="off">
+  <button id="join">JOIN ROOM</button>
+
+  <section id="room">
+    <p>ROOM CODE</p>
+    <div id="roomCode"></div>
+    <p id="count">Players: 1/4</p>
+    <ul id="players"></ul>
+    <button id="copy">COPY ROOM CODE</button>
+    <button id="start" hidden>START GAME</button>
+    <button id="leave">LEAVE ROOM</button>
+  </section>
+
+  <p id="status">Create a room or join with a code.</p>
+  <p class="note">Private room codes · Up to 4 players</p>
+</main>
+
+<script type="module">
+import { joinRoom } from
+  "https://esm.sh/trystero/torrent";
+
+const $ = id => document.getElementById(id);
+const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const playerId = crypto.randomUUID();
+const playerName = "Player-" + playerId.slice(0,4).toUpperCase();
+
+let room = null;
+let roomCode = null;
+let isHost = false;
+let started = false;
+let players = new Map();
+let sendPlayer, sendStart, getPlayer, getStart;
+let startReceived = false;
+
+function say(message) {
+  $("status").textContent = message;
+}
+
+function makeCode() {
+  return Array.from({length:6}, () =>
+    alphabet[Math.floor(Math.random()*alphabet.length)]
+  ).join("");
+}
+
+function updatePlayers() {
+  $("count").textContent = `Players: ${players.size}/4`;
+  $("players").replaceChildren();
+
+  for (const player of players.values()) {
+    const li = document.createElement("li");
+    li.textContent = player.name +
+      (player.id === playerId ? " (You)" : "");
+    $("players").appendChild(li);
+  }
+
+  $("start").disabled =
+    players.size > 4 || players.size < 1 || started;
+}
+
+function reset() {
+  if (room) room.leave();
+
+  room = null;
+  roomCode = null;
+  isHost = false;
+  started = false;
+  startReceived = false;
+  players.clear();
+
+  $("room").style.display = "none";
+  $("create").disabled = false;
+  $("join").disabled = false;
+  $("code").disabled = false;
+  $("start").hidden = true;
+}
+
+async function enterRoom(code, host) {
+  if (room) return;
+  roomCode = code;
+  isHost = host;
+
+  $("create").disabled = true;
+  $("join").disabled = true;
+  $("code").disabled = true;
+  say("Connecting to public signaling network...");
+
+  try {
+    // The room code is also used as a room password.
+    room = joinRoom({
+      appId: "dont-let-them-in-game-v1",
+      password: code
+    }, code);
+
+    const [sendP, getP] = room.makeAction("player");
+    const [sendS, getS] = room.makeAction("start");
+    sendPlayer = sendP;
+    getPlayer = getP;
+    sendStart = sendS;
+    getStart = getS;
+
+    players.set(playerId, {
+      id: playerId,
+      name: playerName,
+      host: isHost
+    });
+
+    getPlayer((data, peerId) => {
+      if (!data || !data.id || !data.name) return;
+
+      // Store each peer under their connection ID.
+      players.set(peerId, {
+        id: data.id,
+        name: String(data.name).slice(0,24),
+        host: !!data.host
+      });
+      updatePlayers();
+
+      // Tell the newly discovered peer about this player.
+      sendPlayer({
+        id: playerId,
+        name: playerName,
+        host: isHost
+      }, peerId);
+    });
+
+    getStart((data) => {
+      if (data?.roomCode === roomCode && !isHost) {
+        startReceived = true;
+        launchGame();
+      }
+    });
+
+    room.onPeerJoin(peerId => {
+      say("A player connected.");
+      sendPlayer({
+        id: playerId,
+        name: playerName,
+        host: isHost
+      }, peerId);
+      updatePlayers();
+    });
+
+    room.onPeerLeave(peerId => {
+      players.delete(peerId);
+      updatePlayers();
+      say("A player disconnected.");
+    });
+
+    $("room").style.display = "block";
+    $("roomCode").textContent = code;
+    $("start").hidden = !isHost;
+
+    updatePlayers();
+    say("Room opened. Share the code with your friends.");
+
+  } catch (err) {
+    reset();
+    say("Connection failed. Try again. " + (err.message || ""));
+  }
+}
+
+$("create").onclick = () => enterRoom(makeCode(), true);
+
+$("join").onclick = () => {
+  const code = $("code").value.trim().toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(code)) {
+    say("Enter a valid 6-character room code.");
+    return;
+  }
+  enterRoom(code, false);
+};
+
+$("copy").onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(roomCode);
+    say("Room code copied!");
+  } catch {
+    say("Your room code is " + roomCode);
+  }
+};
+
+$("start").onclick = () => {
+  if (!isHost || !room || started) return;
+
+  if (players.size > 4) {
+    say("This room has too many players.");
+    return;
+  }
+
+  started = true;
+  sendStart({roomCode});
+  launchGame();
+};
+
+function launchGame() {
+  if (started && !isHost) {
+    // A joining player can receive the host's start signal.
+  } else if (started && isHost) {
+    // The host has already initiated launch.
+  } else {
+    started = true;
+  }
+
+  // Curly apostrophe (U+2019) in the original filename.
+  location.href =
+    "Don%E2%80%99t%20Let%20Them%20In.html?room=" +
+    encodeURIComponent(roomCode);
+}
+
+$("leave").onclick = () => {
+  reset();
+  say("You left the room.");
+};
+</script>
+</body>
+</html>
